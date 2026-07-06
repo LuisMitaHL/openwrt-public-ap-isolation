@@ -1,0 +1,4 @@
+config ap_isolation 'settings'
+	option enabled '1'
+	option vlan_id ''
+	option gateway_ip ''

@@ -1,0 +1,27 @@
+#!/usr/sbin/nft -f
+# Editar
+define GW_IP = 10.65.102.1
+define WLAN_IFACES = { "phy1-pa", "phy1-paw" }
+
+table bridge ap_isolation {
+    set wlan {
+        type ifname
+        elements = WLAN_IFACES
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        iifname @wlan vlan id 1641 arp operation request arp daddr ip $GW_IP counter accept
+        iifname @wlan vlan id 1641 arp operation reply counter accept
+        
+        iifname @wlan vlan id 1641 ether type arp counter drop
+        iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
+
+        iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
+        oifname @wlan vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
+        
+        iifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
+        iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+    }
+}

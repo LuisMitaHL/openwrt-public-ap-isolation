@@ -1,0 +1,8 @@
+#!/bin/sh
+
+[ "$ACTION" = "ifup" ] || exit 0
+
+case "$DEVICE" in
+	phy*|wlan*) /etc/init.d/ap-isolation reload >/dev/null 2>&1 & ;;
+	*) exit 0 ;;
+esac
