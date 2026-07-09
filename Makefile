@@ -31,12 +31,12 @@ define Package/ap-isolation/install
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_DIR) $(1)/usr/sbin
-	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/net
 
 	$(INSTALL_CONF) ./files/etc/config/ap-isolation $(1)/etc/config/ap-isolation
 	$(INSTALL_BIN) ./files/etc/init.d/ap-isolation $(1)/etc/init.d/ap-isolation
 	$(INSTALL_BIN) ./files/usr/sbin/ap-isolation.sh $(1)/usr/sbin/ap-isolation.sh
-	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/50-ap-isolation $(1)/etc/hotplug.d/iface/50-ap-isolation
+	$(INSTALL_DATA) ./files/etc/hotplug.d/net/50-ap-isolation $(1)/etc/hotplug.d/net/50-ap-isolation
 endef
 
 $(eval $(call BuildPackage,ap-isolation))

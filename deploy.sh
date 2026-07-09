@@ -11,7 +11,7 @@ DO_RESTART=0
 FILES=(
 	"files/etc/config/ap-isolation:/etc/config/ap-isolation:644"
 	"files/etc/init.d/ap-isolation:/etc/init.d/ap-isolation:755"
-	"files/etc/hotplug.d/iface/50-ap-isolation:/etc/hotplug.d/iface/50-ap-isolation:644"
+	"files/etc/hotplug.d/net/50-ap-isolation:/etc/hotplug.d/net/50-ap-isolation:644"
 	"files/usr/sbin/ap-isolation.sh:/usr/sbin/ap-isolation.sh:755"
 )
 
