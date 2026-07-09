@@ -11,6 +11,7 @@ gateway ARP.
   dynamically added to the nftables set
 - All 8 original bridge-level rules: ARP filtering, DHCP passthrough,
   broadcast/multicast drop
+- Optional IPv6 support: SLAAC (ND), DHCPv6, ICMPv6 redirect passthrough
 - Optional VLAN ID and gateway IP via dedicated UCI config
 - Procd init script with automatic reload on wireless UCI changes
 - Hotplug trigger — rules re-apply when wireless interfaces come up
@@ -88,7 +89,8 @@ Global options in `/etc/config/ap-isolation`:
 |---|---|---|---|
 | `enabled` | boolean | `1` | Master toggle |
 | `vlan_id` | integer | (empty) | 802.1Q VLAN ID for rules (empty = no VLAN match) |
-| `gateway_ip` | IP address | (empty) | Gateway IP for ARP allow rules (empty = no ARP filtering) |
+| `gateway_ip` | IP address | (empty) | Gateway IPv4 for ARP allow rules (empty = no ARP filtering) |
+| `ipv6_enabled` | boolean | `0` | Enable IPv6 SLAAC, DHCPv6, and ND passthrough |
 
 ### Examples
 
@@ -97,6 +99,14 @@ uci set ap-isolation.settings.gateway_ip='10.65.102.1'
 uci set ap-isolation.settings.vlan_id='1641'
 uci commit ap-isolation
 /etc/init.d/ap-isolation start
+```
+
+Enable IPv6 support (SLAAC + DHCPv6):
+
+```
+uci set ap-isolation.settings.ipv6_enabled='1'
+uci commit ap-isolation
+/etc/init.d/ap-isolation reload
 ```
 
 With `gateway_ip` and `vlan_id` unset, the script only blocks broadcast and
@@ -198,9 +208,83 @@ iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 
 ```
 
 Matches any destination MAC where the first byte's least significant bit is 1
-(the multicast/broadcast flag). This catches all multicast traffic (IPv6
-neighbor discovery, mDNS, UPnP, IGMP, etc.). Together with rule 7, no
-group-addressed frame can pass between wireless clients.
+(the multicast/broadcast flag). This catches all multicast traffic (mDNS, UPnP,
+IGMP, etc.) except for IPv6 ND and DHCPv6 which are accepted by rules 9–17 when
+`ipv6_enabled` is set. Together with rule 7, no group-addressed frame can pass
+between wireless clients.
+
+### IPv6 rules (9–17) — conditional on `ipv6_enabled='1'`
+
+When IPv6 is enabled, 9 additional rules are inserted between DHCPv4 (5–6)
+and the broadcast/multicast drop rules (7–8). Their purpose is to allow
+IPv6 neighbor discovery and DHCPv6 traffic, which use multicast MAC addresses
+that would otherwise be dropped by rule 8.
+
+#### Rules 9–10: Router Discovery (SLAAC)
+
+```
+iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
+oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
+```
+
+Router Solicitation (RS, ICMPv6 type 133) is sent by clients to `ff02::2`
+(all routers multicast) to discover available gateways. Router Advertisement
+(RA, ICMPv6 type 134) is the response from the router containing prefix
+information for SLAAC. Both are essential for stateless address
+autoconfiguration.
+
+#### Rule 11: ICMPv6 Redirect
+
+```
+oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
+```
+
+ICMPv6 Redirect (type 137) is sent by routers to inform hosts of a better
+first-hop for a destination. Allowed from the router side only.
+
+#### Rules 12–15: Neighbor Discovery (NS/NA)
+
+```
+iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+```
+
+Neighbor Solicitation (NS, type 135) resolves an IPv6 address to a MAC address
+(equivalent to IPv4 ARP). Neighbor Advertisement (NA, type 136) is the
+response. Both directions are allowed for the following reasons:
+
+- Clients need to resolve the gateway's MAC via NS/NA
+- The gateway needs to resolve clients' MACs (for reachability)
+- Clients need Duplicate Address Detection (DAD) which uses NS with source `::`
+- Clients need to respond to the gateway's NS with NA
+
+**Permissive tradeoff:** these rules allow NS/NA between clients, meaning
+clients can discover each other's link-layer addresses. However, actual data
+exchange between clients remains blocked by rules 7–8 (multicast/broadcast
+drop). This matches the IPv4 model where client-to-client unicast is possible
+in theory but discovery (ARP) is restricted.
+
+#### Rules 16–17: DHCPv6
+
+```
+iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
+oifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
+```
+
+DHCPv6 clients use source port 546 and destination port 547. Servers respond
+from 547 to 546. Initial solicit messages may be sent to the multicast
+address `ff02::1:2` (All DHCPv6 Relay Agents and Servers), which is why
+these rules must come before the multicast drop (rule 8).
+
+### NPTv6 (Network Prefix Translation)
+
+No bridge-level rules are needed for NPTv6. NPTv6 operates at the
+routing/NAT layer (using `ip6tables` SNAT/DNAT or `nft` NAT rules in the
+`ip6` family), not the bridge layer. IPv6 unicast traffic between clients
+and the gateway already passes through the bridge via the default `accept`
+chain policy.
 
 ### Rule ordering
 
@@ -209,15 +293,21 @@ The sequence matters:
    otherwise all ARP would be dropped before the gateway exception can match.
 2. **DHCP accept** (rules 5–6) must come before **broadcast drop** (rule 7),
    otherwise DHCP broadcasts would be blocked.
-3. Within each group, the more specific match (e.g., ARP request for gateway)
+3. **IPv6 accept** (rules 9–17) must come before **multicast drop** (rule 8),
+   otherwise IPv6 Neighbor Discovery and DHCPv6 multicast traffic would be
+   dropped. These rules are only generated when `ipv6_enabled='1'`.
+4. Within each group, the more specific match (e.g., ARP request for gateway)
    precedes the broader catch-all (e.g., ether type arp).
 
-### Conditional ARP rules
+### Conditional rules
 
-When `gateway_ip` is not configured, rules 1–4 are omitted entirely. This
-avoids breaking internet access (clients would have no way to ARP the
-gateway). Only broadcast/multicast blocking (rules 7–8) and DHCP passthrough
-(rules 5–6) apply in that mode.
+- **ARP rules** (1–4) are omitted when `gateway_ip` is not configured,
+  avoiding broken internet access (clients would have no way to ARP the
+  gateway).
+- **IPv6 rules** (9–17) are omitted when `ipv6_enabled` is `0` (the default),
+  maintaining full backward compatibility. When enabled, they allow SLAAC,
+  DHCPv6, and neighbor discovery traffic through the bridge isolation. NPTv6
+  requires no additional bridge rules — it operates at the routing layer.
 
 ## Reload Triggers
 

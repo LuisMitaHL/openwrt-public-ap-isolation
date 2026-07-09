@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# Editar
+# Reference ruleset — see generated rules on router with: nft list table bridge ap_isolation
 define GW_IP = 10.65.102.1
 define WLAN_IFACES = { "phy1-pa", "phy1-paw" }
 
@@ -21,6 +21,17 @@ table bridge ap_isolation {
         iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
         oifname @wlan vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
         
+        # IPv6 SLAAC + DHCPv6 (generated when config option ipv6_enabled='1')
+        iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
+        oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
+        oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
+        iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+        oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+        iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+        oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+        iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
+        oifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
+
         iifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
         iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
     }

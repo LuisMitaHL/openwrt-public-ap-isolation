@@ -76,6 +76,7 @@ _generate_rules() {
 	local ifaces="$1"
 	local vlan_id="$2"
 	local gw_ip="$3"
+	local ipv6_enabled="$4"
 	local vlan
 
 	[ -z "$ifaces" ] && return 1
@@ -107,6 +108,23 @@ EOF
 	cat <<EOF
 		iifname @wlan ${vlan} ip protocol udp udp sport 68 udp dport 67 counter accept
 		oifname @wlan ${vlan} ip protocol udp udp sport 67 udp dport 68 counter accept
+EOF
+
+	if [ "$ipv6_enabled" = "1" ]; then
+		cat <<EOF
+		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
+		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
+		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
+		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+		iifname @wlan ${vlan} ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
+		oifname @wlan ${vlan} ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
+EOF
+	fi
+
+	cat <<EOF
 		iifname @wlan ${vlan} ether daddr ff:ff:ff:ff:ff:ff counter drop
 		iifname @wlan ${vlan} ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
 	}
@@ -118,7 +136,7 @@ _apply() {
 	local tmpfile
 
 	rm -f /tmp/ap-isolation.nft
-	_generate_rules "$1" "$2" "$3" > /tmp/ap-isolation.nft || return 1
+	_generate_rules "$1" "$2" "$3" "$4" > /tmp/ap-isolation.nft || return 1
 
 	nft delete table bridge ap_isolation 2>/dev/null
 	nft -f /tmp/ap-isolation.nft 2>&1 || {
@@ -145,9 +163,10 @@ do_start() {
 		return 0
 	}
 
-	local vlan_id gw_ip
+	local vlan_id gw_ip ipv6_enabled
 	config_get vlan_id settings vlan_id
 	config_get gw_ip settings gateway_ip
+	config_get_bool ipv6_enabled settings ipv6_enabled 0
 
 	config_load wireless
 	collect_ifaces
@@ -157,7 +176,7 @@ do_start() {
 		return 0
 	}
 
-	_apply "$IFACES" "$vlan_id" "$gw_ip" || {
+	_apply "$IFACES" "$vlan_id" "$gw_ip" "$ipv6_enabled" || {
 		logger -t ap-isolation "Error: failed to apply rules"
 		return 1
 	}
