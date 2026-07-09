@@ -83,6 +83,10 @@ for entry in "${FILES[@]}"; do
 	remote_path="${rest%:*}"
 	mode="${rest##*:}"
 
+	if [ -f "${local_path}.local" ]; then
+		local_path="${local_path}.local"
+	fi
+
 	local_md5_val="$(local_md5 "$local_path")"
 	remote_md5_val="$(remote_md5 "$remote_path")"
 	local_name="${local_path#files/}"
