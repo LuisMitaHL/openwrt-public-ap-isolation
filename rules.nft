@@ -1,6 +1,8 @@
 #!/usr/sbin/nft -f
-# Reference ruleset — see generated rules on router with: nft list table bridge ap_isolation
+# Reference ruleset — strict mode (gateway_ip + gateway_mac configured)
+# Run 'nft list table bridge ap_isolation' on the router to see generated rules
 define GW_IP = 10.65.102.1
+define GW_MAC = aa:bb:cc:dd:ee:ff
 define WLAN_IFACES = { "phy1-pa", "phy1-paw" }
 
 table bridge ap_isolation {
@@ -12,16 +14,23 @@ table bridge ap_isolation {
     chain forward {
         type filter hook forward priority filter; policy accept;
 
+        # ─── Ingress ARP (STA → network, strict) ───
         iifname @wlan vlan id 1641 arp operation request arp daddr ip $GW_IP counter accept
-        iifname @wlan vlan id 1641 arp operation reply counter accept
-        
+        iifname @wlan vlan id 1641 arp operation reply ether daddr $GW_MAC counter accept
         iifname @wlan vlan id 1641 ether type arp counter drop
         iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
 
+        # ─── Egress ARP (network → STA, strict) ───
+        oifname @wlan vlan id 1641 arp operation reply ether saddr $GW_MAC counter accept
+        oifname @wlan vlan id 1641 arp operation request ether saddr $GW_MAC counter accept
+        oifname @wlan vlan id 1641 ether type arp counter drop
+        oifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
+
+        # ─── DHCPv4 ───
         iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
         oifname @wlan vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
-        
-        # IPv6 SLAAC + DHCPv6 (generated when config option ipv6_enabled='1')
+
+        # ─── IPv6 SLAAC + DHCPv6 (ipv6_enabled='1') ───
         iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
         oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
         oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
@@ -32,7 +41,10 @@ table bridge ap_isolation {
         iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
         oifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
 
+        # ─── Broadcast / Multicast drops (always generated) ───
         iifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
         iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+        oifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
+        oifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
     }
 }

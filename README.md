@@ -11,8 +11,11 @@ gateway ARP.
   dynamically added to the nftables set
 - All 8 original bridge-level rules: ARP filtering, DHCP passthrough,
   broadcast/multicast drop
+- Bidirectional filtering blocks unwanted traffic both from and to isolated
+  STAs (ingress + egress)
 - Optional IPv6 support: SLAAC (ND), DHCPv6, ICMPv6 redirect passthrough
 - Optional VLAN ID and gateway IP via dedicated UCI config
+- Three ARP filtering tiers: none, basic, strict (with `gateway_mac`)
 - Procd init script with automatic reload on wireless UCI changes
 - Hotplug trigger — rules re-apply when wireless interfaces come up
 - Sysupgrade-safe (files can be added to `/etc/sysupgrade.conf`)
@@ -90,6 +93,7 @@ Global options in `/etc/config/ap-isolation`:
 | `enabled` | boolean | `1` | Master toggle |
 | `vlan_id` | integer | (empty) | 802.1Q VLAN ID for rules (empty = no VLAN match) |
 | `gateway_ip` | IP address | (empty) | Gateway IPv4 for ARP allow rules (empty = no ARP filtering) |
+| `gateway_mac` | MAC address | (empty) | Gateway MAC for strict bidirectional ARP filtering |
 | `ipv6_enabled` | boolean | `0` | Enable IPv6 SLAAC, DHCPv6, and ND passthrough |
 
 ### Examples
@@ -109,8 +113,30 @@ uci commit ap-isolation
 /etc/init.d/ap-isolation reload
 ```
 
-With `gateway_ip` and `vlan_id` unset, the script only blocks broadcast and
-multicast traffic. Set both values for full client isolation.
+Full isolation with strict ARP filtering (recommended when the gateway is
+a separate device on the same L2 bridge):
+
+```
+uci set ap-isolation.settings.gateway_ip='10.65.102.1'
+uci set ap-isolation.settings.gateway_mac='aa:bb:cc:dd:ee:ff'
+uci set ap-isolation.settings.ipv6_enabled='1'
+uci set ap-isolation.settings.vlan_id='1641'
+uci commit ap-isolation
+/etc/init.d/ap-isolation reload
+```
+
+### ARP Filtering Tiers
+
+ARP rules are generated based on which options are configured:
+
+| Tier | Config | Ingress (STA→network) | Egress (network→STA) |
+|---|---|---|---|
+| **None** | `gateway_ip` empty | No ARP filtering | No ARP filtering |
+| **Basic** | `gateway_ip` set | Only gateway ARP requests + all ARP replies accepted from STAs. Client-to-client ARP blocked. | No ARP filtering |
+| **Strict** | `gateway_ip` + `gateway_mac` set | Only gateway ARP requests + ARP replies directed to gateway MAC accepted from STAs. All other STA-generated ARP blocked. | Only ARP replies and requests from gateway MAC accepted. Spoofed/external ARP to STAs blocked. |
+
+Broadcast and multicast traffic is blocked in both directions regardless
+of the ARP tier (always generated).
 
 ## Interface Discovery
 
@@ -129,49 +155,63 @@ forward path at filter priority. The chain **policy is `accept`**: traffic
 that does not match any rule passes through. Named set **`@wlan`** holds all
 isolated interface names and is referenced by every rule.
 
-### Rule 1 — Allow ARP requests for the gateway
+### ARP rules (1–8) — conditional on `gateway_ip` / `gateway_mac`
+
+ARP rules vary based on the configured tier:
+
+#### Rules 1–4: Ingress ARP (STA → network)
+
+**Strict tier** (`gateway_ip` + `gateway_mac` both set):
 
 ```
 iifname @wlan vlan id 1641 arp operation request arp daddr ip 10.65.102.1 counter accept
-```
-
-Wireless clients need to resolve the gateway's MAC address before they can send
-any IP traffic to the internet. This rule permits ARP requests *only* when the
-target IP is the configured gateway. All other ARP requests are left to the
-drop rules below.
-
-### Rule 2 — Allow ARP replies
-
-```
-iifname @wlan vlan id 1641 arp operation reply counter accept
-```
-
-ARP replies from the gateway (or any host the gateway proxies for) must reach
-the wireless client. This rule accepts all ARP replies on the monitored
-interfaces. Combined with rule 1, the only ARP conversation allowed is
-client↔gateway.
-
-### Rule 3 — Drop all other ARP
-
-```
+iifname @wlan vlan id 1641 arp operation reply ether daddr aa:bb:cc:dd:ee:ff counter accept
 iifname @wlan vlan id 1641 ether type arp counter drop
-```
-
-Any ARP packet that was not already accepted by rules 1 or 2 must be a
-client-to-client ARP. This rule drops it, preventing clients from discovering
-each other's MAC addresses at layer 2.
-
-### Rule 4 — Drop VLAN-encapsulated ARP
-
-```
 iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
 ```
 
-Same as rule 3 but catches ARP packets inside 802.1Q VLAN tags (double-tagged
-or QinQ frames). Without this rule, a malicious client could encapsulate an ARP
-probe in a VLAN header to bypass rule 3.
+- Rule 1: STA asking "who has the gateway IP?" — required for routing
+- Rule 2: STA replying ONLY to the gateway (unicast to `gateway_mac`).
+  This blocks gratuitous ARP from STAs and STA-to-STA ARP replies.
+- Rules 3–4: Drop all remaining ARP from STAs (client-to-client ARP, probes, etc.)
 
-### Rule 5 — Allow DHCP requests (client → server)
+**Basic tier** (`gateway_ip` set, `gateway_mac` empty):
+
+```
+iifname @wlan vlan id 1641 arp operation request arp daddr ip 10.65.102.1 counter accept
+iifname @wlan vlan id 1641 arp operation reply counter accept
+iifname @wlan vlan id 1641 ether type arp counter drop
+iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
+```
+
+Same as strict but rule 2 accepts ALL ARP replies from STAs (less restrictive
+— a STA could reply to another STA's ARP request). This is the original
+behavior before `gateway_mac` was added.
+
+**None** (no `gateway_ip`): all 4 rules are omitted.
+
+#### Rules 5–8: Egress ARP (network → STA) — strict tier only
+
+```
+oifname @wlan vlan id 1641 arp operation reply ether saddr aa:bb:cc:dd:ee:ff counter accept
+oifname @wlan vlan id 1641 arp operation request ether saddr aa:bb:cc:dd:ee:ff counter accept
+oifname @wlan vlan id 1641 ether type arp counter drop
+oifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
+```
+
+- Rule 5: Only ARP replies from the gateway reach STAs — blocks spoofed
+  ARP replies from other devices on the L2 segment.
+- Rule 6: Only the gateway can ARP a STA (e.g., returning internet traffic
+  when the gateway needs to resolve a STA's MAC address). Other APs or
+  devices probing STAs are blocked.
+- Rules 7–8: Drop all remaining ARP directed at STAs (requests and replies
+  from unrecognized source MACs).
+
+These egress rules are only generated in strict tier. In basic/none tiers,
+egress ARP is not filtered (allows broader compatibility but lacks
+egress-side isolation).
+
+### Rule 9 — Allow DHCP requests (client → server)
 
 ```
 iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
@@ -181,7 +221,7 @@ DHCP clients use source port 68 and destination port 67 when sending
 discover/request messages. This rule allows these messages from wireless
 clients to the DHCP server so they can obtain an IP address.
 
-### Rule 6 — Allow DHCP replies (server → client)
+### Rule 10 — Allow DHCP replies (server → client)
 
 ```
 oifname @wlan vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
@@ -191,17 +231,17 @@ DHCP servers respond from port 67 to port 68. The `oifname` keyword matches
 the bridge egress port — this allows DHCP offers/acks to reach wireless
 clients.
 
-### Rule 7 — Drop Ethernet broadcast frames
+### Rule 11 — Drop Ethernet broadcast frames (ingress)
 
 ```
 iifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
 ```
 
 Blocks all Ethernet broadcast frames (destination `ff:ff:ff:ff:ff:ff`). ARP
-and DHCP broadcasts are already handled by rules 1–6. This stops any other
+and DHCP broadcasts are already handled by rules 1–10. This stops any other
 broadcast protocols (NetBIOS, mDNS, LLMNR, etc.) from leaking between clients.
 
-### Rule 8 — Drop Ethernet multicast frames
+### Rule 12 — Drop Ethernet multicast frames (ingress)
 
 ```
 iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
@@ -209,18 +249,42 @@ iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 
 
 Matches any destination MAC where the first byte's least significant bit is 1
 (the multicast/broadcast flag). This catches all multicast traffic (mDNS, UPnP,
-IGMP, etc.) except for IPv6 ND and DHCPv6 which are accepted by rules 9–17 when
-`ipv6_enabled` is set. Together with rule 7, no group-addressed frame can pass
-between wireless clients.
+IGMP, etc.) **originating from** wireless STAs, except for IPv6 ND and DHCPv6
+which are accepted by the IPv6 rules when `ipv6_enabled` is set.
 
-### IPv6 rules (9–17) — conditional on `ipv6_enabled='1'`
+### Rule 13 — Drop Ethernet broadcast frames (egress)
 
-When IPv6 is enabled, 9 additional rules are inserted between DHCPv4 (5–6)
-and the broadcast/multicast drop rules (7–8). Their purpose is to allow
-IPv6 neighbor discovery and DHCPv6 traffic, which use multicast MAC addresses
-that would otherwise be dropped by rule 8.
+```
+oifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
+```
 
-#### Rules 9–10: Router Discovery (SLAAC)
+Blocks broadcast frames arriving from other bridge ports (e.g., other APs on
+the same L2 segment) from reaching wireless STAs. DHCPv4 replies and IPv6
+traffic are already accepted by rules 10 and 15–23 before this drop. ARP
+is handled separately by the egress ARP rules in strict tier.
+
+### Rule 14 — Drop Ethernet multicast frames (egress)
+
+```
+oifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+```
+
+Blocks multicast traffic from external sources (other APs, wired devices)
+from reaching wireless STAs. IPv6 ND and DHCPv6 multicast replies are
+already accepted by the IPv6 rules before this drop.
+
+Rules 13–14 are always generated (regardless of ARP tier), mirroring the
+ingress drops. Together with rules 11–12, broadcast and multicast traffic
+is blocked in both directions across the bridge.
+
+### IPv6 rules (15–23) — conditional on `ipv6_enabled='1'`
+
+When IPv6 is enabled, 9 rules are inserted between DHCPv4 (9–10)
+and the broadcast/multicast drop rules (11–14). They allow IPv6 neighbor
+discovery and DHCPv6 traffic, which use multicast MAC addresses that would
+otherwise be dropped by rules 12 and 14.
+
+#### Rules 15–16: Router Discovery (SLAAC)
 
 ```
 iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
@@ -233,7 +297,7 @@ Router Solicitation (RS, ICMPv6 type 133) is sent by clients to `ff02::2`
 information for SLAAC. Both are essential for stateless address
 autoconfiguration.
 
-#### Rule 11: ICMPv6 Redirect
+#### Rule 17: ICMPv6 Redirect
 
 ```
 oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
@@ -242,7 +306,7 @@ oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter ac
 ICMPv6 Redirect (type 137) is sent by routers to inform hosts of a better
 first-hop for a destination. Allowed from the router side only.
 
-#### Rules 12–15: Neighbor Discovery (NS/NA)
+#### Rules 18–21: Neighbor Discovery (NS/NA)
 
 ```
 iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
@@ -262,11 +326,11 @@ response. Both directions are allowed for the following reasons:
 
 **Permissive tradeoff:** these rules allow NS/NA between clients, meaning
 clients can discover each other's link-layer addresses. However, actual data
-exchange between clients remains blocked by rules 7–8 (multicast/broadcast
+exchange between clients remains blocked by rules 11–14 (multicast/broadcast
 drop). This matches the IPv4 model where client-to-client unicast is possible
 in theory but discovery (ARP) is restricted.
 
-#### Rules 16–17: DHCPv6
+#### Rules 22–23: DHCPv6
 
 ```
 iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
@@ -276,7 +340,7 @@ oifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 547 udp dport 546 counter a
 DHCPv6 clients use source port 546 and destination port 547. Servers respond
 from 547 to 546. Initial solicit messages may be sent to the multicast
 address `ff02::1:2` (All DHCPv6 Relay Agents and Servers), which is why
-these rules must come before the multicast drop (rule 8).
+these rules must come before the multicast drops (rules 12 and 14).
 
 ### NPTv6 (Network Prefix Translation)
 
@@ -289,22 +353,26 @@ chain policy.
 ### Rule ordering
 
 The sequence matters:
-1. **ARP accept** (rules 1–2) must come before **ARP drop** (rules 3–4),
-   otherwise all ARP would be dropped before the gateway exception can match.
-2. **DHCP accept** (rules 5–6) must come before **broadcast drop** (rule 7),
+1. **ARP accept ingress** (rules 1–2) before **ARP drop ingress** (rules 3–4),
+   otherwise all ARP from STAs would be dropped before the gateway exception.
+2. **ARP accept egress** (rules 5–6) before **ARP drop egress** (rules 7–8) in
+   strict tier, otherwise gateway ARP replies/requests to STAs would be blocked.
+3. **DHCPv4 accept** (rules 9–10) before **broadcast drops** (rules 11, 13),
    otherwise DHCP broadcasts would be blocked.
-3. **IPv6 accept** (rules 9–17) must come before **multicast drop** (rule 8),
-   otherwise IPv6 Neighbor Discovery and DHCPv6 multicast traffic would be
-   dropped. These rules are only generated when `ipv6_enabled='1'`.
-4. Within each group, the more specific match (e.g., ARP request for gateway)
-   precedes the broader catch-all (e.g., ether type arp).
+4. **IPv6 accept** (rules 15–23) before **multicast drops** (rules 12, 14),
+   otherwise IPv6 ND and DHCPv6 multicast traffic would be dropped.
+5. Within each group, the more specific match (e.g., ARP request for gateway IP
+   from STAs) precedes the broader catch-all (e.g., ether type arp).
 
 ### Conditional rules
 
-- **ARP rules** (1–4) are omitted when `gateway_ip` is not configured,
-  avoiding broken internet access (clients would have no way to ARP the
-  gateway).
-- **IPv6 rules** (9–17) are omitted when `ipv6_enabled` is `0` (the default),
+- **ARP ingress** (rules 1–4) and **ARP egress** (rules 5–8) are generated
+  based on the configured tier (see [ARP Filtering Tiers](#arp-filtering-tiers)).
+  When `gateway_ip` is not set, no ARP rules are generated.
+- **Broadcast/multicast egress** (rules 13–14) are always generated, blocking
+  unwanted broadcast and multicast traffic arriving from other bridge ports
+  (e.g., other APs on the same L2 segment).
+- **IPv6 rules** (15–23) are omitted when `ipv6_enabled` is `0` (the default),
   maintaining full backward compatibility. When enabled, they allow SLAAC,
   DHCPv6, and neighbor discovery traffic through the bridge isolation. NPTv6
   requires no additional bridge rules — it operates at the routing layer.

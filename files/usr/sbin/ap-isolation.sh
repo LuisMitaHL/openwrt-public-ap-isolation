@@ -77,6 +77,7 @@ _generate_rules() {
 	local vlan_id="$2"
 	local gw_ip="$3"
 	local ipv6_enabled="$4"
+	local gw_mac="$5"
 	local vlan
 
 	[ -z "$ifaces" ] && return 1
@@ -96,7 +97,19 @@ table bridge ap_isolation {
 
 EOF
 
-	if [ -n "$gw_ip" ]; then
+	if [ -n "$gw_ip" ] && [ -n "$gw_mac" ]; then
+		cat <<EOF
+		iifname @wlan ${vlan} arp operation request arp daddr ip ${gw_ip} counter accept
+		iifname @wlan ${vlan} arp operation reply ether daddr ${gw_mac} counter accept
+		iifname @wlan ${vlan} ether type arp counter drop
+		iifname @wlan ${vlan} ether type vlan vlan type arp counter drop
+
+		oifname @wlan ${vlan} arp operation reply ether saddr ${gw_mac} counter accept
+		oifname @wlan ${vlan} arp operation request ether saddr ${gw_mac} counter accept
+		oifname @wlan ${vlan} ether type arp counter drop
+		oifname @wlan ${vlan} ether type vlan vlan type arp counter drop
+EOF
+	elif [ -n "$gw_ip" ]; then
 		cat <<EOF
 		iifname @wlan ${vlan} arp operation request arp daddr ip ${gw_ip} counter accept
 		iifname @wlan ${vlan} arp operation reply counter accept
@@ -127,6 +140,8 @@ EOF
 	cat <<EOF
 		iifname @wlan ${vlan} ether daddr ff:ff:ff:ff:ff:ff counter drop
 		iifname @wlan ${vlan} ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+		oifname @wlan ${vlan} ether daddr ff:ff:ff:ff:ff:ff counter drop
+		oifname @wlan ${vlan} ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
 	}
 }
 EOF
@@ -136,7 +151,7 @@ _apply() {
 	local tmpfile
 
 	rm -f /tmp/ap-isolation.nft
-	_generate_rules "$1" "$2" "$3" "$4" > /tmp/ap-isolation.nft || return 1
+	_generate_rules "$1" "$2" "$3" "$4" "$5" > /tmp/ap-isolation.nft || return 1
 
 	nft delete table bridge ap_isolation 2>/dev/null
 	nft -f /tmp/ap-isolation.nft 2>&1 || {
@@ -163,9 +178,10 @@ do_start() {
 		return 0
 	}
 
-	local vlan_id gw_ip ipv6_enabled
+	local vlan_id gw_ip gw_mac ipv6_enabled
 	config_get vlan_id settings vlan_id
 	config_get gw_ip settings gateway_ip
+	config_get gw_mac settings gateway_mac
 	config_get_bool ipv6_enabled settings ipv6_enabled 0
 
 	config_load wireless
@@ -176,7 +192,7 @@ do_start() {
 		return 0
 	}
 
-	_apply "$IFACES" "$vlan_id" "$gw_ip" "$ipv6_enabled" || {
+	_apply "$IFACES" "$vlan_id" "$gw_ip" "$ipv6_enabled" "$gw_mac" || {
 		logger -t ap-isolation "Error: failed to apply rules"
 		return 1
 	}
