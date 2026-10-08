@@ -10,6 +10,18 @@ Usage: $PROG_NAME {start|stop|reload|help}
   stop    Remove all isolation rules
   reload  Re-generate and re-apply isolation rules
   help    Show this help message
+
+The isolation tier is selected by the 'mode' option in /etc/config/ap-isolation:
+
+  filter   Filter inter-client ARP, broadcast and multicast. Makes no gateway
+           assumption; aims to be paired with bridge/AP isolation
+           (isolate=1/bridge_isolate=1). This is the default.
+
+  gateway  Default-drop gateway allowlist: wireless clients may only exchange
+           traffic with the main router (gateway_ip/gateway_mac); every other
+           broadcast, multicast and unicast frame is dropped. Requires both
+           gateway_ip and gateway_mac and assumes a single main router that also
+           serves DHCP/DNS.
 EOF
 }
 
@@ -72,18 +84,15 @@ _remove_rules() {
 	nft delete table bridge ap_isolation 2>/dev/null
 }
 
-_generate_rules() {
+# Tier 1: blacklist ARP/broadcast/multicast between clients. No gateway
+# allowlist, so unicast between clients on a shared wire is not prevented
+# (bridge port isolation is expected to cover the same-AP case).
+_emit_filter() {
 	local ifaces="$1"
-	local vlan_id="$2"
+	local vlan="$2"
 	local gw_ip="$3"
 	local ipv6_enabled="$4"
 	local gw_mac="$5"
-	local vlan
-
-	[ -z "$ifaces" ] && return 1
-
-	vlan=""
-	[ -n "$vlan_id" ] && [ "$vlan_id" != "0" ] && vlan="vlan id ${vlan_id}"
 
 	cat <<EOF
 table bridge ap_isolation {
@@ -100,12 +109,12 @@ EOF
 	if [ -n "$gw_ip" ] && [ -n "$gw_mac" ]; then
 		cat <<EOF
 		iifname @wlan ${vlan} arp operation request arp daddr ip ${gw_ip} counter accept
-		iifname @wlan ${vlan} arp operation reply ether daddr ${gw_mac} counter accept
+		iifname @wlan ether daddr ${gw_mac} ${vlan} arp operation reply counter accept
 		iifname @wlan ${vlan} ether type arp counter drop
 		iifname @wlan ${vlan} ether type vlan vlan type arp counter drop
 
-		oifname @wlan ${vlan} arp operation reply ether saddr ${gw_mac} counter accept
-		oifname @wlan ${vlan} arp operation request ether saddr ${gw_mac} counter accept
+		oifname @wlan ether saddr ${gw_mac} ${vlan} arp operation reply counter accept
+		oifname @wlan ether saddr ${gw_mac} ${vlan} arp operation request counter accept
 		oifname @wlan ${vlan} ether type arp counter drop
 		oifname @wlan ${vlan} ether type vlan vlan type arp counter drop
 EOF
@@ -147,20 +156,133 @@ EOF
 EOF
 }
 
-_apply() {
-	local tmpfile
+# Tier 2 (gateway): default-drop gateway allowlist. Every frame touching a
+# wireless port must involve the main router, except for the DHCP/ARP/IPv6
+# control plane needed to reach it. Non-wireless bridging (e.g. any wired
+# VLAN) is left untouched.
+_emit_gateway() {
+	local ifaces="$1"
+	local vlan="$2"
+	local gw_ip="$3"
+	local gw_mac="$4"
+	local ipv6_enabled="$5"
 
-	rm -f /tmp/ap-isolation.nft
-	_generate_rules "$1" "$2" "$3" "$4" "$5" > /tmp/ap-isolation.nft || return 1
-
-	nft delete table bridge ap_isolation 2>/dev/null
-	nft -f /tmp/ap-isolation.nft 2>&1 || {
-		local rc=$?
-		rm -f /tmp/ap-isolation.nft
-		logger -t ap-isolation "Error: nft -f failed with status $rc"
-		return $rc
+	cat <<EOF
+table bridge ap_isolation {
+	set wlan {
+		type ifname
+		elements = { ${ifaces} }
 	}
-	rm -f /tmp/ap-isolation.nft
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+
+		# Leave traffic that does not touch a wireless port alone.
+		iifname != @wlan oifname != @wlan counter accept
+
+		# DHCP: clients may ask on the segment; only the main router may answer.
+		iifname @wlan ${vlan} ip protocol udp udp sport 68 udp dport 67 counter accept
+		oifname @wlan ether saddr ${gw_mac} ${vlan} ip protocol udp udp sport 67 udp dport 68 counter accept
+
+		# ARP: resolve only the gateway address; reply only to the gateway;
+		# accept anything the gateway originates.
+		iifname @wlan ${vlan} arp operation request arp daddr ip ${gw_ip} counter accept
+		iifname @wlan ether daddr ${gw_mac} ${vlan} arp operation reply counter accept
+		oifname @wlan ether saddr ${gw_mac} ${vlan} counter accept
+
+		# Internet: everything to the main router, nothing else.
+		iifname @wlan ether daddr ${gw_mac} ${vlan} counter accept
+EOF
+
+	if [ "$ipv6_enabled" = "1" ]; then
+		cat <<EOF
+
+		# IPv6 control plane. Gateway-originated RA/NA/redirect is already
+		# covered by the gateway source rule above.
+		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
+		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+		iifname @wlan ${vlan} ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
+EOF
+	fi
+
+	cat <<EOF
+
+		# Anything else touching a wireless port (client<->client,
+		# client<->wire, foreign broadcast/multicast) is dropped.
+		counter drop
+	}
+}
+EOF
+}
+
+_generate_rules() {
+	local mode="$1"
+	local ifaces="$2"
+	local vlan_id="$3"
+	local gw_ip="$4"
+	local ipv6_enabled="$5"
+	local gw_mac="$6"
+	local vlan
+
+	[ -z "$ifaces" ] && return 1
+
+	vlan=""
+	[ -n "$vlan_id" ] && [ "$vlan_id" != "0" ] && vlan="vlan id ${vlan_id}"
+
+	case "$mode" in
+		gateway)
+			if [ -z "$gw_ip" ] || [ -z "$gw_mac" ]; then
+				logger -t ap-isolation "Error: mode 'gateway' requires gateway_ip and gateway_mac; keeping current rules"
+				return 2
+			fi
+			_emit_gateway "$ifaces" "$vlan" "$gw_ip" "$gw_mac" "$ipv6_enabled"
+			;;
+		*)
+			_emit_filter "$ifaces" "$vlan" "$gw_ip" "$ipv6_enabled" "$gw_mac"
+			;;
+	esac
+}
+
+_apply() {
+	local tmp swap err
+	local rc
+
+	tmp="$(mktemp /tmp/ap-isolation.XXXXXX)" || return 1
+	swap="$(mktemp /tmp/ap-isolation.XXXXXX)" || {
+		rm -f "$tmp"
+		return 1
+	}
+
+	_generate_rules "$@" > "$tmp" || {
+		rc=$?
+		rm -f "$tmp" "$swap"
+		return "$rc"
+	}
+
+	# Single transaction: 'add table' is idempotent and, unlike a bare table
+	# declaration, is visible to the following delete inside the same batch,
+	# so this replaces the live table atomically.
+	{
+		echo "add table bridge ap_isolation"
+		echo "delete table bridge ap_isolation"
+		cat "$tmp"
+	} > "$swap"
+
+	# Validate the exact transaction before touching the live table.
+	if ! err="$(nft -c -f "$swap" 2>&1)"; then
+		logger -t ap-isolation "Error: generated ruleset failed validation: $err"
+		rm -f "$tmp" "$swap"
+		return 1
+	fi
+
+	if ! err="$(nft -f "$swap" 2>&1)"; then
+		rc=$?
+		logger -t ap-isolation "Error: nft -f failed with status $rc: $err"
+		rm -f "$tmp" "$swap"
+		return "$rc"
+	fi
+
+	rm -f "$tmp" "$swap"
 }
 
 do_start() {
@@ -178,7 +300,8 @@ do_start() {
 		return 0
 	}
 
-	local vlan_id gw_ip gw_mac ipv6_enabled
+	local mode vlan_id gw_ip gw_mac ipv6_enabled
+	config_get mode settings mode filter
 	config_get vlan_id settings vlan_id
 	config_get gw_ip settings gateway_ip
 	config_get gw_mac settings gateway_mac
@@ -192,12 +315,12 @@ do_start() {
 		return 0
 	}
 
-	_apply "$IFACES" "$vlan_id" "$gw_ip" "$ipv6_enabled" "$gw_mac" || {
+	_apply "$mode" "$IFACES" "$vlan_id" "$gw_ip" "$ipv6_enabled" "$gw_mac" || {
 		logger -t ap-isolation "Error: failed to apply rules"
 		return 1
 	}
 
-	logger -t ap-isolation "rules applied for interfaces: ${IFACES}"
+	logger -t ap-isolation "rules applied (mode=$mode) for interfaces: ${IFACES}"
 }
 
 do_stop() {

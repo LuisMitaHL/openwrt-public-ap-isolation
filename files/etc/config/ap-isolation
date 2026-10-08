@@ -1,5 +1,8 @@
 config ap_isolation 'settings'
 	option enabled '0'
+	# Isolation tier: 'filter' (ARP/broadcast/multicast filtering, default) or
+	# 'gateway' (default-drop gateway allowlist; requires gateway_ip + gateway_mac).
+	option mode 'filter'
 	option vlan_id ''
 	option gateway_ip ''
 	option gateway_mac ''

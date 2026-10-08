@@ -1,0 +1,46 @@
+#!/usr/sbin/nft -f
+# Reference ruleset — ap-isolation "gateway" mode (default-drop allowlist).
+#
+# Mirrors what /usr/sbin/ap-isolation.sh generates with
+#   uci set ap-isolation.settings.mode='gateway'
+# Requires both gateway_ip and gateway_mac. Replace the defines before use.
+#
+# Only traffic to/from the main router is allowed; every other frame touching a
+# wireless port (client<->client, client<->wire, foreign broadcast/multicast)
+# is dropped by the chain policy. Non-wireless bridging is left untouched.
+
+define GW_IP = 10.65.102.1
+define GW_MAC = aa:bb:cc:dd:ee:ff
+
+table bridge ap_isolation {
+	set wlan {
+		type ifname
+		elements = { "phy1-pa", "phy1-paw" }
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+
+		# Leave traffic that does not touch a wireless port alone.
+		iifname != @wlan oifname != @wlan counter accept
+
+		# DHCP: clients may ask; only the main router may answer.
+		iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
+		oifname @wlan ether saddr $GW_MAC vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
+
+		# ARP: resolve only the gateway, reply only to it, accept everything it sends.
+		iifname @wlan vlan id 1641 arp operation request arp daddr ip $GW_IP counter accept
+		iifname @wlan ether daddr $GW_MAC vlan id 1641 arp operation reply counter accept
+		oifname @wlan ether saddr $GW_MAC vlan id 1641 counter accept
+
+		# Internet: everything to the main router, nothing else.
+		iifname @wlan ether daddr $GW_MAC vlan id 1641 counter accept
+
+		# IPv6 control plane (generated only with ipv6_enabled='1').
+		iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
+		iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+		iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
+
+		counter drop
+	}
+}

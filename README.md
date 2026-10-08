@@ -1,9 +1,14 @@
 # ap-isolation — Public Wi-Fi AP Client Isolation for OpenWrt (nftables)
 
 Automatically applies bridge-level client isolation rules to wireless interfaces
-that have `isolate` enabled in `/etc/config/wireless`. Uses nftables to block
-ARP, broadcast, and multicast traffic between clients while allowing DHCP and
-gateway ARP.
+that have `isolate` enabled in `/etc/config/wireless`. There are two isolation
+modes, selected with the UCI `mode` option:
+
+- **`filter`** (default) — nftables blacklist: blocks ARP, broadcast and
+  multicast between clients while allowing DHCP and gateway ARP.
+- **`gateway`** — nftables allowlist with default drop: clients may only
+  exchange traffic with the configured main router; all other traffic is
+  dropped.
 
 ## Features
 
@@ -15,7 +20,9 @@ gateway ARP.
   STAs (ingress + egress)
 - Optional IPv6 support: SLAAC (ND), DHCPv6, ICMPv6 redirect passthrough
 - Optional VLAN ID and gateway IP via dedicated UCI config
-- Three ARP filtering tiers: none, basic, strict (with `gateway_mac`)
+- Two isolation modes: `filter` (default) and default-drop `gateway` allowlist
+- Three ARP handling tiers within `filter` mode: `off`, `reply-any`,
+  `reply-pinned` (with `gateway_mac`)
 - Procd init script with automatic reload on wireless UCI changes
 - Hotplug trigger — rules re-apply when wireless interfaces come up
 - Sysupgrade-safe (files can be added to `/etc/sysupgrade.conf`)
@@ -46,13 +53,14 @@ wireless config changes or when a wireless interface comes up.
 ```
 ap-isolation/
 ├── Makefile                     # OpenWrt buildroot package
-├── rules.nft                    # Original reference ruleset
+├── rules.nft                    # Reference ruleset, filter mode
+├── rules-gateway.nft            # Reference ruleset, gateway mode
 ├── deploy.sh                    # Quick deployment to running router
 └── files/
     ├── etc/
     │   ├── config/ap-isolation          # UCI config for VLAN ID / gateway IP
     │   ├── init.d/ap-isolation          # Procd init script
-    │   └── hotplug.d/iface/50-ap-isolation  # Interface hotplug trigger
+    │   └── hotplug.d/net/50-ap-isolation    # Interface hotplug trigger
     └── usr/sbin/ap-isolation.sh         # Main logic script
 ```
 
@@ -90,15 +98,33 @@ Global options in `/etc/config/ap-isolation`:
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | boolean | `1` | Master toggle |
+| `enabled` | boolean | `0` | Master toggle (opt-in) |
+| `mode` | string | `filter` | Isolation tier: `filter` or `gateway` |
 | `vlan_id` | integer | (empty) | 802.1Q VLAN ID for rules (empty = no VLAN match) |
-| `gateway_ip` | IP address | (empty) | Gateway IPv4 for ARP allow rules (empty = no ARP filtering) |
-| `gateway_mac` | MAC address | (empty) | Gateway MAC for strict bidirectional ARP filtering |
+| `gateway_ip` | IP address | (empty) | Gateway IPv4 used by the filter/gateway allow rules |
+| `gateway_mac` | MAC address | (empty) | Gateway MAC for pinned ARP and `gateway` mode |
 | `ipv6_enabled` | boolean | `0` | Enable IPv6 SLAAC, DHCPv6, and ND passthrough |
+
+### Isolation modes
+
+`mode 'filter'` (default) keeps the historical behaviour: the chain policy is
+`accept` and only ARP, broadcast and multicast between clients are dropped.
+`gateway_ip`/`gateway_mac` tune the ARP handling (see
+[ARP handling tiers](#arp-handling-tiers-filter-mode)) but unicast between
+clients on a shared L2 segment is **not** blocked — pair this mode with
+hostapd/bridge port isolation (`isolate='1'`, `bridge_isolate='1'`).
+
+`mode 'gateway'` is the strongest tier. The chain policy is `drop` and only
+traffic to/from `gateway_mac` is allowed, plus the DHCP/ARP/IPv6 control plane
+needed to reach it. Every other frame touching a wireless port (client↔client,
+client↔wire, foreign broadcast/multicast) is dropped. It **requires** both
+`gateway_ip` and `gateway_mac` and assumes a single main router that also
+serves DHCP/DNS. Non-wireless bridging on the AP is left untouched.
 
 ### Examples
 
 ```
+uci set ap-isolation.settings.enabled='1'
 uci set ap-isolation.settings.gateway_ip='10.65.102.1'
 uci set ap-isolation.settings.vlan_id='1641'
 uci commit ap-isolation
@@ -113,10 +139,11 @@ uci commit ap-isolation
 /etc/init.d/ap-isolation reload
 ```
 
-Full isolation with strict ARP filtering (recommended when the gateway is
-a separate device on the same L2 bridge):
+Gateway allowlist mode (highest tier; single main router on the same L2 bridge):
 
 ```
+uci set ap-isolation.settings.enabled='1'
+uci set ap-isolation.settings.mode='gateway'
 uci set ap-isolation.settings.gateway_ip='10.65.102.1'
 uci set ap-isolation.settings.gateway_mac='aa:bb:cc:dd:ee:ff'
 uci set ap-isolation.settings.ipv6_enabled='1'
@@ -125,18 +152,20 @@ uci commit ap-isolation
 /etc/init.d/ap-isolation reload
 ```
 
-### ARP Filtering Tiers
+### ARP handling tiers (`filter` mode)
 
-ARP rules are generated based on which options are configured:
+Within `filter` mode, ARP rules are generated based on which options are
+configured:
 
 | Tier | Config | Ingress (STA→network) | Egress (network→STA) |
 |---|---|---|---|
-| **None** | `gateway_ip` empty | No ARP filtering | No ARP filtering |
-| **Basic** | `gateway_ip` set | Only gateway ARP requests + all ARP replies accepted from STAs. Client-to-client ARP blocked. | No ARP filtering |
-| **Strict** | `gateway_ip` + `gateway_mac` set | Only gateway ARP requests + ARP replies directed to gateway MAC accepted from STAs. All other STA-generated ARP blocked. | Only ARP replies and requests from gateway MAC accepted. Spoofed/external ARP to STAs blocked. |
+| **off** | `gateway_ip` empty | No ARP filtering | No ARP filtering |
+| **reply-any** | `gateway_ip` set | Only gateway ARP requests + all ARP replies accepted from STAs. Client-to-client ARP blocked. | No ARP filtering |
+| **reply-pinned** | `gateway_ip` + `gateway_mac` set | Only gateway ARP requests + ARP replies directed to gateway MAC accepted from STAs. All other STA-generated ARP blocked. | Only ARP replies and requests from gateway MAC accepted. Spoofed/external ARP to STAs blocked. |
 
-Broadcast and multicast traffic is blocked in both directions regardless
-of the ARP tier (always generated).
+`mode 'gateway'` ignores these tiers: it is a superset (default drop, gateway
+allowlist). Broadcast and multicast traffic is blocked in both directions
+regardless of the tier (always generated).
 
 ## Interface Discovery
 
@@ -150,10 +179,12 @@ The script resolves UCI section names to kernel interface names:
 
 ## Nftables Rules Explained
 
-The rules operate in the **`bridge`** table family, hooking into the bridge
-forward path at filter priority. The chain **policy is `accept`**: traffic
-that does not match any rule passes through. Named set **`@wlan`** holds all
-isolated interface names and is referenced by every rule.
+The rules below describe **`filter` mode**. They operate in the **`bridge`**
+table family, hooking into the bridge forward path at filter priority. The
+chain **policy is `accept`**: traffic that does not match any rule passes
+through. Named set **`@wlan`** holds all isolated interface names and is
+referenced by every rule. **`gateway` mode** instead sets `policy drop` and
+allows only the main router — see `rules-gateway.nft`.
 
 ### ARP rules (1–8) — conditional on `gateway_ip` / `gateway_mac`
 
@@ -161,7 +192,7 @@ ARP rules vary based on the configured tier:
 
 #### Rules 1–4: Ingress ARP (STA → network)
 
-**Strict tier** (`gateway_ip` + `gateway_mac` both set):
+**reply-pinned** (`gateway_ip` + `gateway_mac` both set):
 
 ```
 iifname @wlan vlan id 1641 arp operation request arp daddr ip 10.65.102.1 counter accept
@@ -175,7 +206,7 @@ iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
   This blocks gratuitous ARP from STAs and STA-to-STA ARP replies.
 - Rules 3–4: Drop all remaining ARP from STAs (client-to-client ARP, probes, etc.)
 
-**Basic tier** (`gateway_ip` set, `gateway_mac` empty):
+**reply-any** (`gateway_ip` set, `gateway_mac` empty):
 
 ```
 iifname @wlan vlan id 1641 arp operation request arp daddr ip 10.65.102.1 counter accept
@@ -184,13 +215,13 @@ iifname @wlan vlan id 1641 ether type arp counter drop
 iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
 ```
 
-Same as strict but rule 2 accepts ALL ARP replies from STAs (less restrictive
+Same as reply-pinned but rule 2 accepts ALL ARP replies from STAs (less restrictive
 — a STA could reply to another STA's ARP request). This is the original
 behavior before `gateway_mac` was added.
 
 **None** (no `gateway_ip`): all 4 rules are omitted.
 
-#### Rules 5–8: Egress ARP (network → STA) — strict tier only
+#### Rules 5–8: Egress ARP (network → STA) — reply-pinned only
 
 ```
 oifname @wlan vlan id 1641 arp operation reply ether saddr aa:bb:cc:dd:ee:ff counter accept
@@ -207,7 +238,7 @@ oifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
 - Rules 7–8: Drop all remaining ARP directed at STAs (requests and replies
   from unrecognized source MACs).
 
-These egress rules are only generated in strict tier. In basic/none tiers,
+These egress rules are only generated in the reply-pinned tier. In reply-any/off tiers,
 egress ARP is not filtered (allows broader compatibility but lacks
 egress-side isolation).
 
@@ -261,7 +292,7 @@ oifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
 Blocks broadcast frames arriving from other bridge ports (e.g., other APs on
 the same L2 segment) from reaching wireless STAs. DHCPv4 replies and IPv6
 traffic are already accepted by rules 10 and 15–23 before this drop. ARP
-is handled separately by the egress ARP rules in strict tier.
+is handled separately by the egress ARP rules in the reply-pinned tier.
 
 ### Rule 14 — Drop Ethernet multicast frames (egress)
 
@@ -356,7 +387,7 @@ The sequence matters:
 1. **ARP accept ingress** (rules 1–2) before **ARP drop ingress** (rules 3–4),
    otherwise all ARP from STAs would be dropped before the gateway exception.
 2. **ARP accept egress** (rules 5–6) before **ARP drop egress** (rules 7–8) in
-   strict tier, otherwise gateway ARP replies/requests to STAs would be blocked.
+   reply-pinned tier, otherwise gateway ARP replies/requests to STAs would be blocked.
 3. **DHCPv4 accept** (rules 9–10) before **broadcast drops** (rules 11, 13),
    otherwise DHCP broadcasts would be blocked.
 4. **IPv6 accept** (rules 15–23) before **multicast drops** (rules 12, 14),
@@ -367,7 +398,7 @@ The sequence matters:
 ### Conditional rules
 
 - **ARP ingress** (rules 1–4) and **ARP egress** (rules 5–8) are generated
-  based on the configured tier (see [ARP Filtering Tiers](#arp-filtering-tiers)).
+  based on the configured tier (see [ARP handling tiers](#arp-handling-tiers-filter-mode)).
   When `gateway_ip` is not set, no ARP rules are generated.
 - **Broadcast/multicast egress** (rules 13–14) are always generated, blocking
   unwanted broadcast and multicast traffic arriving from other bridge ports
@@ -383,7 +414,7 @@ The sequence matters:
 |---|---|---|
 | Wireless UCI change | `procd_add_reload_trigger "wireless"` | `uci commit wireless` + `wifi reload` |
 | ap-isolation UCI change | `procd_add_reload_trigger "ap-isolation"` | `uci commit ap-isolation` |
-| Interface comes up | Hotplug `/etc/hotplug.d/iface/50-ap-isolation` | `ifup` on `phy*` or `wlan*` devices |
+| Interface comes up | Hotplug `/etc/hotplug.d/net/50-ap-isolation` | `ifup` on `phy*` or `wlan*` devices |
 
 ## Usage Examples
 

@@ -20,8 +20,12 @@ endef
 define Package/ap-isolation/description
   Implements client isolation on public Wi-Fi access points using nftables.
   Reads UCI wireless config to determine which interfaces need isolation,
-  and applies bridge-level nftables rules to block ARP, broadcast, and
-  multicast traffic between clients while allowing DHCP and gateway ARP.
+  and applies bridge-level nftables rules.
+
+  Two tiers via the 'mode' option:
+    filter  - filters ARP, broadcast and multicast between clients (default);
+    gateway - default-drop gateway allowlist: clients may only exchange
+              traffic with the configured main router.
 endef
 
 define Build/Compile
