@@ -8,5 +8,6 @@ config ap_isolation 'settings'
 	option gateway_mac ''
 	option ipv6_enabled '0'
 	# Experimental qca8k stale-ATU roaming workaround (pin static bridge FDB
-	# entries on STA association). See /usr/sbin/ap-isolation-fdb.
+	# entries on STA association). Needs the separate 'ap-isolation-fdb'
+	# package installed and enabled; see /usr/sbin/ap-isolation-fdb.
 	option fdb_workaround '0'

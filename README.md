@@ -134,6 +134,10 @@ entry on the station's wireless interface at association (and removes it on
 disassociation) — the equivalent of doing
 `bridge fdb replace <mac> dev <wlan> vlan <vid> master static` by hand.
 
+The watcher and its init script ship in the separate **`ap-isolation-fdb`**
+package, which is selected per device (e.g. only for the ipq40xx cAP ac) and is
+inert until `fdb_workaround` is enabled. It is not installed by default.
+
 **Experimental:** the pins are static; if the daemon is killed while a station
 is associated the entry persists until the next event or a manual delete.
 
