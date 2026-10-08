@@ -104,6 +104,7 @@ Global options in `/etc/config/ap-isolation`:
 | `gateway_ip` | IP address | (empty) | Gateway IPv4 used by the filter/gateway allow rules |
 | `gateway_mac` | MAC address | (empty) | Gateway MAC for pinned ARP and `gateway` mode |
 | `ipv6_enabled` | boolean | `0` | Enable IPv6 SLAAC, DHCPv6, and ND passthrough |
+| `fdb_workaround` | boolean | `0` | Experimental qca8k stale-ATU roaming workaround (see below) |
 
 ### Isolation modes
 
@@ -120,6 +121,21 @@ needed to reach it. Every other frame touching a wireless port (client↔client,
 client↔wire, foreign broadcast/multicast) is dropped. It **requires** both
 `gateway_ip` and `gateway_mac` and assumes a single main router that also
 serves DHCP/DNS. Non-wireless bridging on the AP is left untouched.
+
+### qca8k stale-ATU roaming workaround (`fdb_workaround`)
+
+On some QCA8k/DSA targets a station that roams from the wire onto the AP can be
+blackholed: the switch keeps a stale dynamic ATU entry pointing at the wired
+uplink, and downstream frames are discarded in silicon before reaching the CPU
+(openwrt/openwrt#25365). The in-tree qca8k patches purge that entry on the
+host-FDB-add path; if a deployment still hits it, setting `fdb_workaround '1'`
+starts `ap-isolation-fdb`, which watches `iw event` and pins a static bridge FDB
+entry on the station's wireless interface at association (and removes it on
+disassociation) — the equivalent of doing
+`bridge fdb replace <mac> dev <wlan> vlan <vid> master static` by hand.
+
+**Experimental:** the pins are static; if the daemon is killed while a station
+is associated the entry persists until the next event or a manual delete.
 
 ### Examples
 

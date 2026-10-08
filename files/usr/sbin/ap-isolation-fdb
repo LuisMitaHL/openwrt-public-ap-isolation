@@ -1,0 +1,69 @@
+#!/bin/sh
+# ap-isolation-fdb - opt-in qca8k stale-ATU roaming workaround (openwrt#25365).
+#
+# For each station associating to an isolated AP interface, pin a static
+# bridge FDB entry for it on that interface, and remove it on disassociation.
+# The static entry makes the bridge re-program the switch so the stale dynamic
+# ATU entry left pointing at the wired uplink after a roam is purged (the same
+# thing "bridge fdb replace ... master static" does by hand).
+#
+# Enable with:
+#   uci set ap-isolation.settings.fdb_workaround='1'
+#   uci commit ap-isolation && /etc/init.d/ap-isolation-fdb restart
+#
+# NOTE: the pinned entries are static; if the daemon dies while a station is
+# associated the entry stays until the next association/disassociation or a
+# manual "bridge fdb del". Treat this as experimental.
+
+. /lib/functions.sh
+
+PROG=ap-isolation-fdb
+
+IFACES=""
+_collect() {
+	local section="$1" iso ifname
+	config_get iso "$section" isolate
+	[ "$iso" = "1" ] || return
+	config_get ifname "$section" ifname
+	[ -n "$ifname" ] && IFACES="$IFACES $ifname"
+}
+
+config_load ap-isolation
+config_get_bool e settings enabled 0
+config_get_bool wu settings fdb_workaround 0
+config_get vlan_id settings vlan_id
+
+[ "$e" = "1" ] && [ "$wu" = "1" ] || { logger -t "$PROG" "disabled"; exit 0; }
+
+VL=""
+[ -n "$vlan_id" ] && [ "$vlan_id" != "0" ] && VL="vlan $vlan_id"
+
+config_load wireless
+config_foreach _collect wifi-iface
+[ -n "$IFACES" ] || { logger -t "$PROG" "no isolated interfaces"; exit 0; }
+
+_is_ours() {
+	local i
+	for i in $IFACES; do [ "$i" = "$1" ] && return 0; done
+	return 1
+}
+
+logger -t "$PROG" "watching iw events for:$IFACES"
+iw event | while IFS= read -r line; do
+	case "$line" in
+		*": new station "*)
+			iface="${line%%:*}"; mac="${line##* }"
+			if _is_ours "$iface"; then
+				bridge fdb replace "$mac" dev "$iface" $VL master static 2>/dev/null && \
+					logger -t "$PROG" "pinned $mac on $iface"
+			fi
+			;;
+		*": del station "*)
+			iface="${line%%:*}"; mac="${line##* }"
+			if _is_ours "$iface"; then
+				bridge fdb del "$mac" dev "$iface" $VL master static 2>/dev/null
+				logger -t "$PROG" "unpinned $mac on $iface"
+			fi
+			;;
+	esac
+done
