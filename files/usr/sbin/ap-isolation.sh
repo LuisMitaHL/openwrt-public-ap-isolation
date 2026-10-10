@@ -113,10 +113,10 @@ EOF
 		iifname @wlan ${vlan} ether type arp counter drop
 		iifname @wlan ${vlan} ether type vlan vlan type arp counter drop
 
-		oifname @wlan ether saddr ${gw_mac} ${vlan} arp operation reply counter accept
-		oifname @wlan ether saddr ${gw_mac} ${vlan} arp operation request counter accept
-		oifname @wlan ${vlan} ether type arp counter drop
-		oifname @wlan ${vlan} ether type vlan vlan type arp counter drop
+		oifname @wlan ether saddr ${gw_mac} arp operation reply counter accept
+		oifname @wlan ether saddr ${gw_mac} arp operation request counter accept
+		oifname @wlan ether type arp counter drop
+		oifname @wlan ether type vlan vlan type arp counter drop
 EOF
 	elif [ -n "$gw_ip" ]; then
 		cat <<EOF
@@ -129,28 +129,28 @@ EOF
 
 	cat <<EOF
 		iifname @wlan ${vlan} ip protocol udp udp sport 68 udp dport 67 counter accept
-		oifname @wlan ${vlan} ip protocol udp udp sport 67 udp dport 68 counter accept
+		oifname @wlan ip protocol udp udp sport 67 udp dport 68 counter accept
 EOF
 
 	if [ "$ipv6_enabled" = "1" ]; then
 		cat <<EOF
 		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
-		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
-		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
 		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
-		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
 		iifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
-		oifname @wlan ${vlan} ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
 		iifname @wlan ${vlan} ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
-		oifname @wlan ${vlan} ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
+		oifname @wlan ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
 EOF
 	fi
 
 	cat <<EOF
 		iifname @wlan ${vlan} ether daddr ff:ff:ff:ff:ff:ff counter drop
 		iifname @wlan ${vlan} ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
-		oifname @wlan ${vlan} ether daddr ff:ff:ff:ff:ff:ff counter drop
-		oifname @wlan ${vlan} ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+		oifname @wlan ether daddr ff:ff:ff:ff:ff:ff counter drop
+		oifname @wlan ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
 	}
 }
 EOF
@@ -182,13 +182,13 @@ table bridge ap_isolation {
 
 		# DHCP: clients may ask on the segment; only the main router may answer.
 		iifname @wlan ${vlan} ip protocol udp udp sport 68 udp dport 67 counter accept
-		oifname @wlan ether saddr ${gw_mac} ${vlan} ip protocol udp udp sport 67 udp dport 68 counter accept
+		oifname @wlan ether saddr ${gw_mac} ip protocol udp udp sport 67 udp dport 68 counter accept
 
 		# ARP: resolve only the gateway address; reply only to the gateway;
 		# accept anything the gateway originates.
 		iifname @wlan ${vlan} arp operation request arp daddr ip ${gw_ip} counter accept
 		iifname @wlan ether daddr ${gw_mac} ${vlan} arp operation reply counter accept
-		oifname @wlan ether saddr ${gw_mac} ${vlan} counter accept
+		oifname @wlan ether saddr ${gw_mac} counter accept
 
 		# Internet: everything to the main router, nothing else.
 		iifname @wlan ether daddr ${gw_mac} ${vlan} counter accept
@@ -226,6 +226,9 @@ _generate_rules() {
 
 	[ -z "$ifaces" ] && return 1
 
+	# VLAN matching is only reliable on the ingress (STA -> bridge) path:
+	# the bridge has already consumed the 802.1Q tag before the egress
+	# forward hook, so egress rules must not be VLAN-qualified.
 	vlan=""
 	[ -n "$vlan_id" ] && [ "$vlan_id" != "0" ] && vlan="vlan id ${vlan_id}"
 

@@ -28,30 +28,30 @@ table bridge ap_isolation {
 		iifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
 
 		# Egress ARP (network -> STA): only the gateway.
-		oifname @wlan ether saddr $GW_MAC vlan id 1641 arp operation reply counter accept
-		oifname @wlan ether saddr $GW_MAC vlan id 1641 arp operation request counter accept
-		oifname @wlan vlan id 1641 ether type arp counter drop
-		oifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
+		oifname @wlan ether saddr $GW_MAC arp operation reply counter accept
+		oifname @wlan ether saddr $GW_MAC arp operation request counter accept
+		oifname @wlan ether type arp counter drop
+		oifname @wlan ether type vlan vlan type arp counter drop
 
 		# DHCPv4.
 		iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
-		oifname @wlan vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
+		oifname @wlan ip protocol udp udp sport 67 udp dport 68 counter accept
 
 		# IPv6 SLAAC + DHCPv6 (generated only with ipv6_enabled='1').
 		iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
-		oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
-		oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
 		iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
-		oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
 		iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
-		oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+		oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
 		iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
-		oifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
+		oifname @wlan ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
 
 		# Broadcast / multicast drops (always generated).
 		iifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
 		iifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
-		oifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
-		oifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+		oifname @wlan ether daddr ff:ff:ff:ff:ff:ff counter drop
+		oifname @wlan ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
 	}
 }

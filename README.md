@@ -100,7 +100,7 @@ Global options in `/etc/config/ap-isolation`:
 |---|---|---|---|
 | `enabled` | boolean | `0` | Master toggle (opt-in) |
 | `mode` | string | `filter` | Isolation tier: `filter` or `gateway` |
-| `vlan_id` | integer | (empty) | 802.1Q VLAN ID for rules (empty = no VLAN match) |
+| `vlan_id` | integer | (empty) | 802.1Q VLAN ID matched on ingress from the STAs (empty = no VLAN match). The bridge consumes the tag on the egress path, so egress rules are never VLAN-qualified. |
 | `gateway_ip` | IP address | (empty) | Gateway IPv4 used by the filter/gateway allow rules |
 | `gateway_mac` | MAC address | (empty) | Gateway MAC for pinned ARP and `gateway` mode |
 | `ipv6_enabled` | boolean | `0` | Enable IPv6 SLAAC, DHCPv6, and ND passthrough |
@@ -244,10 +244,10 @@ behavior before `gateway_mac` was added.
 #### Rules 5–8: Egress ARP (network → STA) — reply-pinned only
 
 ```
-oifname @wlan vlan id 1641 arp operation reply ether saddr aa:bb:cc:dd:ee:ff counter accept
-oifname @wlan vlan id 1641 arp operation request ether saddr aa:bb:cc:dd:ee:ff counter accept
-oifname @wlan vlan id 1641 ether type arp counter drop
-oifname @wlan vlan id 1641 ether type vlan vlan type arp counter drop
+oifname @wlan ether saddr aa:bb:cc:dd:ee:ff arp operation reply counter accept
+oifname @wlan ether saddr aa:bb:cc:dd:ee:ff arp operation request counter accept
+oifname @wlan ether type arp counter drop
+oifname @wlan ether type vlan vlan type arp counter drop
 ```
 
 - Rule 5: Only ARP replies from the gateway reach STAs — blocks spoofed
@@ -275,7 +275,7 @@ clients to the DHCP server so they can obtain an IP address.
 ### Rule 10 — Allow DHCP replies (server → client)
 
 ```
-oifname @wlan vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
+oifname @wlan ip protocol udp udp sport 67 udp dport 68 counter accept
 ```
 
 DHCP servers respond from port 67 to port 68. The `oifname` keyword matches
@@ -306,7 +306,7 @@ which are accepted by the IPv6 rules when `ipv6_enabled` is set.
 ### Rule 13 — Drop Ethernet broadcast frames (egress)
 
 ```
-oifname @wlan vlan id 1641 ether daddr ff:ff:ff:ff:ff:ff counter drop
+oifname @wlan ether daddr ff:ff:ff:ff:ff:ff counter drop
 ```
 
 Blocks broadcast frames arriving from other bridge ports (e.g., other APs on
@@ -317,7 +317,7 @@ is handled separately by the egress ARP rules in the reply-pinned tier.
 ### Rule 14 — Drop Ethernet multicast frames (egress)
 
 ```
-oifname @wlan vlan id 1641 ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
+oifname @wlan ether daddr & 01:00:00:00:00:00 == 01:00:00:00:00:00 counter drop
 ```
 
 Blocks multicast traffic from external sources (other APs, wired devices)
@@ -339,7 +339,7 @@ otherwise be dropped by rules 12 and 14.
 
 ```
 iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-solicit counter accept
-oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
+oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-router-advert counter accept
 ```
 
 Router Solicitation (RS, ICMPv6 type 133) is sent by clients to `ff02::2`
@@ -351,7 +351,7 @@ autoconfiguration.
 #### Rule 17: ICMPv6 Redirect
 
 ```
-oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
+oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-redirect counter accept
 ```
 
 ICMPv6 Redirect (type 137) is sent by routers to inform hosts of a better
@@ -361,9 +361,9 @@ first-hop for a destination. Allowed from the router side only.
 
 ```
 iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
-oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
+oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-solicit counter accept
 iifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
-oifname @wlan vlan id 1641 ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
+oifname @wlan ip6 nexthdr icmpv6 icmpv6 type nd-neighbor-advert counter accept
 ```
 
 Neighbor Solicitation (NS, type 135) resolves an IPv6 address to a MAC address
@@ -385,7 +385,7 @@ in theory but discovery (ARP) is restricted.
 
 ```
 iifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 546 udp dport 547 counter accept
-oifname @wlan vlan id 1641 ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
+oifname @wlan ip6 nexthdr udp udp sport 547 udp dport 546 counter accept
 ```
 
 DHCPv6 clients use source port 546 and destination port 547. Servers respond

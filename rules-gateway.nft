@@ -26,12 +26,12 @@ table bridge ap_isolation {
 
 		# DHCP: clients may ask; only the main router may answer.
 		iifname @wlan vlan id 1641 ip protocol udp udp sport 68 udp dport 67 counter accept
-		oifname @wlan ether saddr $GW_MAC vlan id 1641 ip protocol udp udp sport 67 udp dport 68 counter accept
+		oifname @wlan ether saddr $GW_MAC ip protocol udp udp sport 67 udp dport 68 counter accept
 
 		# ARP: resolve only the gateway, reply only to it, accept everything it sends.
 		iifname @wlan vlan id 1641 arp operation request arp daddr ip $GW_IP counter accept
 		iifname @wlan ether daddr $GW_MAC vlan id 1641 arp operation reply counter accept
-		oifname @wlan ether saddr $GW_MAC vlan id 1641 counter accept
+		oifname @wlan ether saddr $GW_MAC counter accept
 
 		# Internet: everything to the main router, nothing else.
 		iifname @wlan ether daddr $GW_MAC vlan id 1641 counter accept
